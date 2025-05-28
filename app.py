@@ -1,41 +1,46 @@
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
-import os
-import subprocess
-
-app = Flask(__name__)
-
-UPLOAD_FOLDER = 'uploads'
-BASE_AUDIO_FOLDER = os.path.join(UPLOAD_FOLDER, 'base')
-RECORDINGS_FOLDER = os.path.join(UPLOAD_FOLDER, 'recordings')
-OUTPUT_FOLDER = os.path.join(UPLOAD_FOLDER, 'output')
-
 @app.route('/merge', methods=['POST'])
 def merge_audio():
     owner_id = request.form.get('owner_id')
-    base_file = request.files.get('base_audio')
-    name_file = request.files.get('name_audio')
-    city_file = request.files.get('city_audio')
+    base_audio = request.files.get('base_audio')
+    name_audio = request.files.get('name_audio')
+    city_audio = request.files.get('city_audio')
 
-    if not all([owner_id, base_file, name_file, city_file]):
-        return jsonify({'error': 'Missing parameters'}), 400
+    if not all([base_audio, name_audio, city_audio]):
+        return jsonify({'error': 'Missing audio files'}), 400
 
-    base_path = os.path.join(BASE_AUDIO_FOLDER, secure_filename(base_file.filename))
-    name_path = os.path.join(RECORDINGS_FOLDER, f'{owner_id}_name.mp3')
-    city_path = os.path.join(RECORDINGS_FOLDER, f'{owner_id}_city.mp3')
-    output_path = os.path.join(OUTPUT_FOLDER, f'{owner_id}_merged.mp3')
+    # Save all input audio temporarily
+    base_path = os.path.join(UPLOAD_FOLDER, f'{owner_id}_base.mp3')
+    name_path = os.path.join(UPLOAD_FOLDER, f'{owner_id}_name.mp3')
+    city_path = os.path.join(UPLOAD_FOLDER, f'{owner_id}_city.mp3')
+    merged_filename = f'merged_{owner_id}.mp3'
+    merged_path = os.path.join(MERGED_FOLDER, merged_filename)
 
-    base_file.save(base_path)
-    name_file.save(name_path)
-    city_file.save(city_path)
+    base_audio.save(base_path)
+    name_audio.save(name_path)
+    city_audio.save(city_path)
 
+    # Merge audio using ffmpeg
+    command = [
+        'ffmpeg', '-y',
+        '-i', f'concat:{base_path}|{name_path}|{city_path}',
+        '-acodec', 'copy', merged_path
+    ]
+    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if not os.path.exists(merged_path):
+        return jsonify({'error': 'Failed to merge audio'}), 500
+
+    # Upload to Google Drive
+    gdrive_url = upload_to_drive(merged_path, parent_folder_id='1WX54Z6xGPIymu4DFvPgTLX8_0zsWD3V3')
+
+    # Log to Google Sheets
     try:
-        cmd = f"ffmpeg -y -i {base_path} -i {name_path} -i {city_path} -filter_complex '[0:0][1:0][2:0]concat=n=3:v=0:a=1[out]' -map '[out]' {output_path}"
-        subprocess.run(cmd, shell=True, check=True)
-    except subprocess.CalledProcessError as e:
-        return jsonify({'error': str(e)}), 500
+        append_row_to_active_sheet(name_audio.filename.rsplit('.', 1)[0], city_audio.filename.rsplit('.', 1)[0], gdrive_url)
+    except Exception as e:
+        print("Logging to sheet failed:", e)
 
-    return jsonify({'status': 'success', 'output_file': output_path})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    return jsonify({
+        'message': 'Audio merged and uploaded successfully',
+        'output_file': merged_filename,
+        'gdrive_url': gdrive_url
+    })
